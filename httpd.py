@@ -1,14 +1,18 @@
-from socket import *
-s = socket(AF_INET, SOCK_STREAM)
-s.bind(("", 9000))
-s.listen(5)
-while True:
-    connection, address = s.accept()
-    print("Received connection from: {}, connection: {}".format(address, connection))
-    data = connection.recv(1024)
-    if data:
-        print(data)
-        connection.close()
+#!/usr/bin/env python3
 
-    #c.sendall("Hello %s\n" % a[0])
-    #c.close()
+import socket
+
+HOST = '127.0.0.1'  # Standard loopback interface address (localhost)
+PORT = 9000        # Port to listen on (non-privileged ports are > 1023)
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    s.bind((HOST, PORT))
+    s.listen()
+    conn, addr = s.accept()
+    with conn:
+        print('Connected by', addr)
+        while True:
+            data = conn.recv(1024)
+            if not data:
+                break
+            conn.sendall(data)
