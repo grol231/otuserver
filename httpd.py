@@ -4,9 +4,11 @@ import os
 import shutil
 import posixpath
 import argparse
-from socketserver import ThreadingTCPServer
+from socketserver import TCPServer
 from socketserver import StreamRequestHandler
 import urllib
+from queue import Queue
+from threading import Thread
 
 
 class BaseHTTPRequestHandler(StreamRequestHandler):
@@ -21,7 +23,6 @@ class BaseHTTPRequestHandler(StreamRequestHandler):
                 self.close_connection = True
                 return
             if not self.parse_request():
-                # An error code has been sent, just exit
                 return
             mname = 'do_' + self.command
             if not hasattr(self, mname):
@@ -29,10 +30,9 @@ class BaseHTTPRequestHandler(StreamRequestHandler):
                 return
             method = getattr(self, mname)
             method()
-            self.wfile.flush()  # actually send the response if not already done.
+            self.wfile.flush()
         except socket.timeout as e:
-            # a read or a write timed out.  Discard this connection
-            #self.log_error("Request timed out: %r", e)
+
             return
 
     def send_error(self, code, message):
@@ -85,7 +85,24 @@ class BaseHTTPRequestHandler(StreamRequestHandler):
         self.command, self.path , self.version = command, path, version
         return True
 
-class HTTPServer(ThreadingTCPServer):
+
+class ThreadingMixIn:
+    def set_pool(self, pool):
+        self._pool = pool
+
+    def process_request_thread(self, request, client_address):
+        try:
+            self.finish_request(request, client_address)
+            self.shutdown_request(request)
+        except:
+            self.handle_error(request, client_address)
+            self.shutdown_request(request)
+
+    def process_request(self, request, client_address):
+        self._pool.add_task(self.process_request_thread, request, client_address)
+
+
+class HTTPServer(ThreadingMixIn, TCPServer):
     pass
 
 
@@ -97,6 +114,7 @@ class OTUServer(HTTPServer):
 
     def get_document_root(self):
         return self._document_root
+
 
 class HTTPRequestHandler(BaseHTTPRequestHandler):
     extensions_map = {
@@ -128,7 +146,6 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         f = self.send_head()
         if f:
             f.close()
-
 
     def send_head(self):
         path = self.translate_path(self.path)
@@ -194,8 +211,6 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
     def copyfile(self, source, outputfile):
         shutil.copyfileobj(source, outputfile)
 
-
-
     def translate_path(self, path):
         path = path.split('?', 1)[0]
         trailing_slash = path.rstrip().endswith('/')
@@ -220,27 +235,54 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         return path
 
 
+class Worker(Thread):
+    def __init__(self, tasks):
+        Thread.__init__(self)
+        self.tasks = tasks
+        self.daemon = True
+        self.start()
+
+    def run(self):
+        while True:
+            func, args, kargs = self.tasks.get()
+            try:
+                func(*args, **kargs)
+            except Exception as e:
+                print(e)
+            finally:
+                self.tasks.task_done()
+
+
+class ThreadPool:
+    def __init__(self, num_threads):
+        self.tasks = Queue(num_threads)
+        for _ in range(num_threads):
+            Worker(self.tasks)
+
+    def add_task(self, func, *args, **kargs):
+        self.tasks.put((func, args, kargs))
+
+    def wait_completion(self):
+        self.tasks.join()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-r', dest='document_root', required=False)
+    parser.add_argument('-w', dest='worker_number', required=False, default=1)
     args = parser.parse_args()
 
     HOST, PORT = "localhost", 8080
+    worker_number = int(args.worker_number)
+    pool = ThreadPool(worker_number)
 
     server = OTUServer((HOST, PORT), HTTPRequestHandler)
     server.set_document_root(args.document_root)
-    #ip, port = server.server_address
+    server.set_pool(pool)
     try:
         print('server run')
         server.serve_forever()
     finally:
         print('server stop')
+        pool.wait_completion()
         server.server_close()
-    # Start a thread with the server -- that thread will then start one
-    # more thread for each request
-    # server_thread = threading.Thread(target=server.serve_forever)
-    # # Exit the server thread when the main thread terminates
-    # server_thread.daemon = False
-    # server_thread.start()
-    # print("Server loop running in thread:", server_thread.name)
-    # server.shutdown()
