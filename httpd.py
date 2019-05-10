@@ -5,14 +5,10 @@ import shutil
 import posixpath
 import argparse
 import logging
-from socketserver import TCPServer
-#from socketserver import StreamRequestHandler
 import urllib
-#from queue import Queue
-#from threading import Thread
 import threading
 import selectors
-from multiprocessing import Process, Queue, current_process, active_children
+from multiprocessing import Process, current_process
 
 
 class BaseServer:
@@ -65,11 +61,7 @@ class BaseServer:
 
     def finish_request(self, request, client_address):
         self.RequestHandlerClass(request, client_address, self)
-        process = Process(target=self.RequestHandlerClass, args=(request, client_address, self))
-        process.daemon = True
-        process.start()
-        logging.info('process : {}'.format(process))
-gt
+
     def shutdown_request(self, request):
         self.close_request(request)
 
@@ -83,36 +75,6 @@ gt
         import traceback
         traceback.print_exc()
         print('-'*40)
-
-#
-# class MultiprocessingServer(BaseServer):
-#
-#     def __init__(self, server_address, RequestHandlerClass, worker_number):
-#         super().__init__(server_address, RequestHandlerClass)
-#         self._request_queue = Queue()
-#         self._worker_number = worker_number
-#
-#     def server_forever(self):
-#         super().serve_forever()
-#         for i in range(self._worker_number):
-#             Process(target=self.worker, args=(self._request_queue, )).start()
-#
-#     def server_close(self):
-#         for i in range(self._worker_number):
-#             self._request_queue.put('STOP')
-#
-#     def process_request(self, request, client_address):
-#         self._request_queue.put((request, client_address))
-#
-#     def worker(self, queue):
-#         for request, client_address in iter(queue.get, 'STOP'):
-#             logging.info('accept request: {}, client_address: {}'.format(request, client_address))
-#             try:
-#                 self.finish_request(request, client_address)
-#                 self.shutdown_request(request)
-#             except:
-#                 self.handle_error(request, client_address)
-#                 self.shutdown_request(request)
 
 
 class OTUServer(BaseServer):
@@ -149,15 +111,7 @@ class OTUServer(BaseServer):
         self.socket.listen(self.request_queue_size)
 
     def server_close(self):
-        #super().server_close()
-        logging.info('server close')
-        processes = active_children()
-        for process in active_children():
-            logging.info("Shutting down process %r", process)
-            process.terminate()
-            process.join()
         self.socket.close()
-        self.shutdown()
 
     def fileno(self):
         return self.socket.fileno()
@@ -313,9 +267,6 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         super().__init__(request, client_address, server)
         self.server = server
 
-    def do_POST(self):  #TODO: delete it
-        self.server.server_close()
-
     def do_GET(self):
         f = self.send_head()
         if f:
@@ -418,7 +369,14 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         return path
 
 
-if __name__ == "__main__":
+def serve_forever(server):
+    try:
+        server.serve_forever()
+    except Exception as e:
+        logging.error(e)
+
+
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-r', dest='document_root', required=False)
     parser.add_argument('-w', dest='worker_number', required=False, default=1)
@@ -430,10 +388,24 @@ if __name__ == "__main__":
 
     server = OTUServer((HOST, PORT), HTTPRequestHandler)
     server.set_document_root(args.document_root)
+
+    for i in range(worker_number):
+        p = Process(target=serve_forever, args=(server,))
+        p.daemon = True
+        p.start()
+        logging.info(p)
     try:
         logging.info('server run')
         server.serve_forever()
     finally:
         logging.info('server stop')
         server.server_close()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        logging.error(e)
+
 
