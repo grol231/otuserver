@@ -4,11 +4,220 @@ import os
 import shutil
 import posixpath
 import argparse
+import logging
 from socketserver import TCPServer
-from socketserver import StreamRequestHandler
+#from socketserver import StreamRequestHandler
 import urllib
-from queue import Queue
-from threading import Thread
+#from queue import Queue
+#from threading import Thread
+import threading
+import selectors
+from multiprocessing import Process, Queue, current_process, active_children
+
+
+class BaseServer:
+    timeout = None
+
+    def __init__(self, server_address, RequestHandlerClass):
+        self.server_address = server_address
+        self.RequestHandlerClass = RequestHandlerClass
+        self.__is_shut_down = threading.Event()
+        self.__shutdown_request = False
+
+    def server_activate(self):
+        pass
+
+    def serve_forever(self, poll_interval=0.5):
+        self.__is_shut_down.clear()
+        try:
+            with selectors.PollSelector() as selector:
+                selector.register(self, selectors.EVENT_READ)
+
+                while not self.__shutdown_request:
+                    ready = selector.select(poll_interval)
+                    if ready:
+                        self._handle_request_noblock()
+        finally:
+            self.__shutdown_request = False
+            self.__is_shut_down.set()
+
+    def shutdown(self):
+        self.__shutdown_request = True
+        self.__is_shut_down.wait()
+
+    def _handle_request_noblock(self):
+        try:
+            request, client_address = self.get_request()
+        except OSError:
+            return
+        self.process_request(request, client_address)
+
+    def process_request(self, request, client_address):
+        try:
+            self.finish_request(request, client_address)
+            self.shutdown_request(request)
+        except:
+            self.handle_error(request, client_address)
+            self.shutdown_request(request)
+
+    def server_close(self):
+        pass
+
+    def finish_request(self, request, client_address):
+        self.RequestHandlerClass(request, client_address, self)
+        process = Process(target=self.RequestHandlerClass, args=(request, client_address, self))
+        process.daemon = True
+        process.start()
+        logging.info('process : {}'.format(process))
+gt
+    def shutdown_request(self, request):
+        self.close_request(request)
+
+    def close_request(self, request):
+        request.close()
+
+    def handle_error(self, request, client_address):
+        print('-'*40)
+        print('Exception happened during processing of request from', end=' ')
+        print(client_address)
+        import traceback
+        traceback.print_exc()
+        print('-'*40)
+
+#
+# class MultiprocessingServer(BaseServer):
+#
+#     def __init__(self, server_address, RequestHandlerClass, worker_number):
+#         super().__init__(server_address, RequestHandlerClass)
+#         self._request_queue = Queue()
+#         self._worker_number = worker_number
+#
+#     def server_forever(self):
+#         super().serve_forever()
+#         for i in range(self._worker_number):
+#             Process(target=self.worker, args=(self._request_queue, )).start()
+#
+#     def server_close(self):
+#         for i in range(self._worker_number):
+#             self._request_queue.put('STOP')
+#
+#     def process_request(self, request, client_address):
+#         self._request_queue.put((request, client_address))
+#
+#     def worker(self, queue):
+#         for request, client_address in iter(queue.get, 'STOP'):
+#             logging.info('accept request: {}, client_address: {}'.format(request, client_address))
+#             try:
+#                 self.finish_request(request, client_address)
+#                 self.shutdown_request(request)
+#             except:
+#                 self.handle_error(request, client_address)
+#                 self.shutdown_request(request)
+
+
+class OTUServer(BaseServer):
+
+    address_family = socket.AF_INET
+
+    socket_type = socket.SOCK_STREAM
+
+    request_queue_size = 5
+
+    allow_reuse_address = False
+
+    document_root = None
+
+    def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
+        super().__init__(server_address, RequestHandlerClass)
+        self.socket = socket.socket(self.address_family,
+                                    self.socket_type)
+        if bind_and_activate:
+            try:
+                self.server_bind()
+                self.server_activate()
+            except:
+                self.server_close()
+                raise
+
+    def server_bind(self):
+        if self.allow_reuse_address:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.bind(self.server_address)
+        self.server_address = self.socket.getsockname()
+
+    def server_activate(self):
+        self.socket.listen(self.request_queue_size)
+
+    def server_close(self):
+        #super().server_close()
+        logging.info('server close')
+        processes = active_children()
+        for process in active_children():
+            logging.info("Shutting down process %r", process)
+            process.terminate()
+            process.join()
+        self.socket.close()
+        self.shutdown()
+
+    def fileno(self):
+        return self.socket.fileno()
+
+    def get_request(self):
+        return self.socket.accept()
+
+    def shutdown_request(self, request):
+        try:
+            request.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        self.close_request(request)
+
+    def set_document_root(self, document_root):
+        self._document_root = document_root
+
+    def get_document_root(self):
+        return self._document_root
+
+
+class BaseRequestHandler:
+    def __init__(self, request, client_address, server):
+        logging.info('current process: {}'.format(current_process().name))
+        self.request = request
+        self.client_address = client_address
+        self.server = server
+        self.setup()
+        try:
+            self.handle()
+        finally:
+            self.finish()
+
+    def setup(self):
+        pass
+
+    def handle(self):
+        pass
+
+    def finish(self):
+        pass
+
+
+class StreamRequestHandler(BaseRequestHandler):
+    rbufsize = -1
+    wbufsize = 0
+
+    def setup(self):
+        self.connection = self.request
+        self.rfile = self.connection.makefile('rb', self.rbufsize)
+        self.wfile = self.connection.makefile('wb', self.wbufsize)
+
+    def finish(self):
+        if not self.wfile.closed:
+            try:
+                self.wfile.flush()
+            except socket.error:
+                pass
+        self.wfile.close()
+        self.rfile.close()
 
 
 class BaseHTTPRequestHandler(StreamRequestHandler):
@@ -32,7 +241,6 @@ class BaseHTTPRequestHandler(StreamRequestHandler):
             method()
             self.wfile.flush()
         except socket.timeout as e:
-
             return
 
     def send_error(self, code, message):
@@ -86,36 +294,6 @@ class BaseHTTPRequestHandler(StreamRequestHandler):
         return True
 
 
-class ThreadingMixIn:
-    def set_pool(self, pool):
-        self._pool = pool
-
-    def process_request_thread(self, request, client_address):
-        try:
-            self.finish_request(request, client_address)
-            self.shutdown_request(request)
-        except:
-            self.handle_error(request, client_address)
-            self.shutdown_request(request)
-
-    def process_request(self, request, client_address):
-        self._pool.add_task(self.process_request_thread, request, client_address)
-
-
-class HTTPServer(ThreadingMixIn, TCPServer):
-    pass
-
-
-class OTUServer(HTTPServer):
-    _document_root = None
-
-    def set_document_root(self, document_root):
-        self._document_root = document_root
-
-    def get_document_root(self):
-        return self._document_root
-
-
 class HTTPRequestHandler(BaseHTTPRequestHandler):
     extensions_map = {
         '.html': 'text/html',
@@ -133,6 +311,10 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
     def __init__(self, request, client_address, server):
         self._document_root = server.get_document_root()
         super().__init__(request, client_address, server)
+        self.server = server
+
+    def do_POST(self):  #TODO: delete it
+        self.server.server_close()
 
     def do_GET(self):
         f = self.send_head()
@@ -212,6 +394,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         shutil.copyfileobj(source, outputfile)
 
     def translate_path(self, path):
+        logging.info(path)
         path = path.split('?', 1)[0]
         trailing_slash = path.rstrip().endswith('/')
         try:
@@ -235,54 +418,22 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         return path
 
 
-class Worker(Thread):
-    def __init__(self, tasks):
-        Thread.__init__(self)
-        self.tasks = tasks
-        self.daemon = True
-        self.start()
-
-    def run(self):
-        while True:
-            func, args, kargs = self.tasks.get()
-            try:
-                func(*args, **kargs)
-            except Exception as e:
-                print(e)
-            finally:
-                self.tasks.task_done()
-
-
-class ThreadPool:
-    def __init__(self, num_threads):
-        self.tasks = Queue(num_threads)
-        for _ in range(num_threads):
-            Worker(self.tasks)
-
-    def add_task(self, func, *args, **kargs):
-        self.tasks.put((func, args, kargs))
-
-    def wait_completion(self):
-        self.tasks.join()
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-r', dest='document_root', required=False)
     parser.add_argument('-w', dest='worker_number', required=False, default=1)
     args = parser.parse_args()
-
+    logging.basicConfig(format='[%(asctime)s] %(levelname).1s %(message)s', level=logging.INFO,
+                        datefmt='%Y.%m.%d %H:%M:%S', filename="")
     HOST, PORT = "localhost", 8080
     worker_number = int(args.worker_number)
-    pool = ThreadPool(worker_number)
 
     server = OTUServer((HOST, PORT), HTTPRequestHandler)
     server.set_document_root(args.document_root)
-    server.set_pool(pool)
     try:
-        print('server run')
+        logging.info('server run')
         server.serve_forever()
     finally:
-        print('server stop')
-        pool.wait_completion()
+        logging.info('server stop')
         server.server_close()
+
