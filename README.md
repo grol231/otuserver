@@ -1,5 +1,5 @@
 # otuserver
-This is a simple http server based thread pool.
+Простой многопоточный http сервер.
 
 ### Конфигурирование
 
